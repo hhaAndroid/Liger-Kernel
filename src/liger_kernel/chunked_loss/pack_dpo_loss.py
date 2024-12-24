@@ -432,7 +432,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
     @staticmethod
     def backward(ctx, *grad_output):
         grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
-        return *grads, None, None, None, None, None, None, None, None
+        return *grads, None, None, None, None, None, None, None, None, None, None
 
 
 class LigerFusedLinearPackDPOLoss(torch.nn.Module):
