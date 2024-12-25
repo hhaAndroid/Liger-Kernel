@@ -365,10 +365,10 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             loss_kwargs["ref_chosen_logps"] = ref_chosen_logps
             loss_kwargs["ref_rejected_logps"] = ref_rejected_logps
 
-        chosen_logits = beta * (chosen_logps - ref_chosen_logps)
-        rejected_logits = beta * (rejected_logps - ref_rejected_logps)
-        reward_margin = (chosen_logits - rejected_logits).mean()
-        reward_acc = (chosen_logits > rejected_logits).float().mean()
+        chosen_rewards = beta * (chosen_logps - ref_chosen_logps)
+        rejected_rewards = beta * (rejected_logps - ref_rejected_logps)
+        reward_margin = (chosen_rewards - rejected_rewards).mean()
+        reward_acc = (chosen_rewards > rejected_rewards).float().mean()
 
         preference_loss_outputs = preference_loss_fn(
             chosen_logps, rejected_logps, chosen_bs, beta=beta, **loss_kwargs
@@ -382,8 +382,8 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
         return_vars = (
             chosen_logps,
             rejected_logps,
-            chosen_logits.mean(),
-            rejected_logits.mean(),
+            chosen_rewards.mean(),
+            rejected_rewards.mean(),
             reward_margin,
             reward_acc,
             chosen_nll_loss,
