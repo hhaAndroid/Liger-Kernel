@@ -1,10 +1,10 @@
 import torch
 from liger_kernel.chunked_loss import LigerFusedLinearDPOLoss, LigerFusedLinearPackDPOLoss
+from liger_kernel.chunked_loss.dpo_utils import RunningMoments
 from mmengine.runner import set_random_seed
 import torch.nn.functional as F
 
 set_random_seed(42)
-
 
 def unpack_sequence(packed: torch.Tensor,
                     num_tokens,
@@ -32,11 +32,14 @@ class LigerLMHeadDPO(torch.nn.Module):
         self.lin = torch.nn.Linear(in_features=H, out_features=V, bias=bias, dtype=dtype)
         self.ref_lin = torch.nn.Linear(in_features=H, out_features=V, bias=ref_bias, dtype=dtype)
 
+        self.running = RunningMoments()
         self.dpo_loss_pack = LigerFusedLinearPackDPOLoss(
             ignore_index=ignore_index,
             beta=beta,
-            use_ref_model=True,
-            compute_nll_loss=compute_nll_loss,
+            loss_types=('sigmoid', 'bco_pair'),
+            runnings=self.running,
+            loss_weights=(0.8, 0.2,),
+            use_ref_model=True
         )
         self.dpo_loss = LigerFusedLinearDPOLoss(
             ignore_index=ignore_index,
@@ -133,7 +136,7 @@ pack_input_ids = pack_input_ids[:, :20]
 ref_pack_input_ids = ref_pack_input_ids[:, :20]
 pack_labels = pack_labels[:, :20]
 batch_input_ids = batch_input_ids[torch.tensor([0, 1, 4, 5])]
-ref_batch_input_ids = ref_batch_input_ids[torch.tensor([0, 1, 4,  5])]
+ref_batch_input_ids = ref_batch_input_ids[torch.tensor([0, 1, 4, 5])]
 batch_labels = batch_labels[torch.tensor([0, 1, 4, 5])]
 
 input1 = batch_input_ids.detach().clone().requires_grad_(True)
@@ -158,28 +161,34 @@ pack_input_ids = pack_input_ids.detach().clone().requires_grad_(True)
 print('========================')
 target_ = unpack_sequence(pack_labels, num_tokens)
 global_chosen_label_sum = sum([(t != -100).sum() for t in target_[0::2]])
-loss1, aggregated_aux_outputs1 = liger_lm_head_dpo(pack_input_ids, ref_pack_input_ids, pack_labels,
-                                                   num_tokens=num_tokens, pack=True,
-                                                   global_chosen_label_sum=global_chosen_label_sum)
+loss1, policy_chosen_logits_mean, policy_rejected_logits_mean, reward_margin, reward_acc, policy_nll_loss = liger_lm_head_dpo(
+    pack_input_ids,
+    ref_pack_input_ids,
+    pack_labels,
+    num_tokens=num_tokens,
+    pack=True,
+    global_chosen_label_sum=global_chosen_label_sum)
 # print(loss1)
 # print(aggregated_aux_outputs1)
 
 loss_dict = {
     'dpo_losses': loss1,
-    'chosen_rewards': aggregated_aux_outputs1[2],
-    'rejected_rewards': aggregated_aux_outputs1[3],
-    'reward_margin': aggregated_aux_outputs1[4],
-    'policy_nll_loss': aggregated_aux_outputs1[6],
+    'chosen_rewards': policy_chosen_logits_mean,
+    'rejected_rewards': policy_rejected_logits_mean,
+    'reward_margin': reward_margin,
+    'reward_acc': reward_acc,
+    'policy_nll_loss': policy_nll_loss,
 }
 print(loss_dict)
 
-# loss1.backward()
+loss1.backward()
 # print(liger_lm_head_dpo.lin.weight.grad, liger_lm_head_dpo.lin.bias.grad)
 # print(pack_input_ids.grad)
 # liger_lm_head_dpo.lin.weight.grad = None
 # liger_lm_head_dpo.lin.bias.grad = None
 
 import torch.nn as nn
+
 
 def cross_entropy_loss(logits, labels):
     loss_fct = nn.CrossEntropyLoss(reduction='none')
@@ -268,7 +277,7 @@ loss = -F.logsigmoid(0.1 * logits)
 chosen_rewards = 0.1 * (policy_chosen_logps - reference_chosen_logps)
 rejected_rewards = 0.1 * (policy_rejected_logps - reference_rejected_logps)
 print('============================')
-total_loss=(loss + policy_nll_loss).mean()
+total_loss = (loss + policy_nll_loss).mean()
 loss_dict = {
     'total_loss': total_loss.item(),
     'dpo_losses': loss.mean(),
