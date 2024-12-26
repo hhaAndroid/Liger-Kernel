@@ -22,7 +22,7 @@ def chunk_nested_list(nested_list, chunk_count):
 def chunk_to_tensor(chosen_nested_list, rejected_nested_list):
     # chosen 拼接在前面，rejected 拼接在后面
     out_tensor = [torch.cat(chosen_nested_list, dim=1), torch.cat(rejected_nested_list, dim=1)]
-    len_chosen = out_tensor[0].shape[1]
+    len_chosen = out_tensor[0].size(1)
     return torch.cat(out_tensor, dim=1), len_chosen
 
 
