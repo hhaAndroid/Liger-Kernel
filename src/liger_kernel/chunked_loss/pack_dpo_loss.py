@@ -37,7 +37,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             beta=0.1,
             loss_type='sigmoid',
             loss_weight=1.0,
-            runnings=None,
+            bco_pair_mean=None,
     ):
         """
         Paper: https://arxiv.org/pdf/2305.18290
@@ -74,7 +74,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             loss = -F.logsigmoid(logits_diff).sum() / chosen_bs
 
         elif loss_type == 'bco_pair':
-            delta = runnings.mean
+            delta = bco_pair_mean
             loss = -F.logsigmoid(chosen_rewards - delta) - F.logsigmoid(-(rejected_rewards - delta))
             loss = loss.sum() / chosen_bs
         else:
@@ -96,12 +96,12 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             rpo_alpha=1.0,
             loss_types=('sigmoid',),
             loss_weights=(1.0,),
-            runnings=None,
             compute_nll_loss=False,
             compiled=True,
             use_ref_model=True,
             num_tokens=None,
             global_chosen_label_sum=None,
+            bco_pair_mean=None,
             **loss_kwargs,
     ):
 
@@ -136,10 +136,10 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             beta=beta,
             loss_types=loss_types,
             loss_weights=loss_weights,
-            runnings=runnings,
             compute_nll_loss=compute_nll_loss,
             num_tokens=num_tokens,
             global_chosen_label_sum=global_chosen_label_sum,
+            bco_pair_mean=bco_pair_mean,
             use_ref_model=use_ref_model,
             ref_weight=ref_weight,
             ref_bias=ref_bias,
@@ -152,18 +152,18 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             """
             if bias is not None:
                 return torch.func.grad_and_value(compute_loss, argnums=(0, 1, 3), has_aux=True)(
-                    input_chunk,
-                    weight,
-                    target_chunk,
-                    bias,
-                    ref_input_chunk=ref_input_chunk,
-                    len_chosen_chunk=len_chosen_chunk
-                )
+                        input_chunk,
+                        weight,
+                        target_chunk,
+                        bias,
+                        ref_input_chunk=ref_input_chunk,
+                        len_chosen_chunk=len_chosen_chunk
+                    )
             else:
                 return torch.func.grad_and_value(compute_loss, argnums=(0, 1), has_aux=True)(
-                    input_chunk, weight, target_chunk, ref_input_chunk=ref_input_chunk,
-                    len_chosen_chunk=len_chosen_chunk
-                )
+                        input_chunk, weight, target_chunk, ref_input_chunk=ref_input_chunk,
+                        len_chosen_chunk=len_chosen_chunk
+                    )
 
         def accumulate_chunk(input_chunk, target_chunk, ref_input_chunk=None, len_chosen_chunk=None):
             if bias is not None:
@@ -257,7 +257,8 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
         # 更新 bco 的 running
         if len(bco_pair_rewards_batch) > 0:
             bco_pair_rewards_batch = torch.cat(bco_pair_rewards_batch).mean().detach()
-            runnings.update(bco_pair_rewards_batch)
+        else:
+            bco_pair_rewards_batch = torch.tensor(0)
 
         grad_inputs = [torch.cat([grad_chosen_input, grad_rejected_input], dim=1) for
                        grad_chosen_input, grad_rejected_input in zip(grad_chosen_inputs, grad_rejected_inputs)]
@@ -281,6 +282,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             reward_margin,
             reward_acc,
             policy_nll_loss,
+            bco_pair_rewards_batch,
         )
         return loss_acc, *return_vars
 
@@ -296,7 +298,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             beta=0.1,
             loss_types=('sigmoid',),
             loss_weights=(1.0,),
-            runnings=None,
+            bco_pair_mean=None,
             compute_nll_loss=True,
             use_ref_model=False,
             ref_input_chunk=None,
@@ -369,7 +371,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
         for curr_type, curr_weight in zip(loss_types, loss_weights):
             curr_losses, curr_chosen_rewards, curr_rejected_rewards = preference_loss_fn(
                 chosen_logps, rejected_logps, chosen_bs, beta=beta, loss_type=curr_type,
-                loss_weight=curr_weight, runnings=runnings, **loss_kwargs
+                loss_weight=curr_weight, bco_pair_mean=bco_pair_mean, **loss_kwargs
             )
             if curr_type == 'bco_pair':
                 # 必须要是 batch 级别更新，否则不准确，因此需要特别处理
@@ -441,7 +443,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
     def backward(ctx, *grad_output):
         grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
         # print(grads[1].dtype,'xyyyyyyyxx')
-        return *grads, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return *grads, None, None, None, None, None, None, None, None, None, None, None, None, None, None,None
 
 
 class LigerFusedLinearPackDPOLoss(torch.nn.Module):
@@ -456,7 +458,6 @@ class LigerFusedLinearPackDPOLoss(torch.nn.Module):
             rpo_alpha: float = 1.0,
             loss_types: tuple = ('sigmoid',),
             loss_weights: tuple = (1.0,),
-            runnings=None,
             compiled: bool = True,
             use_ref_model: bool = True,
     ):
@@ -473,7 +474,6 @@ class LigerFusedLinearPackDPOLoss(torch.nn.Module):
         self.rpo_alpha = rpo_alpha
         self.loss_types = loss_types
         self.loss_weights = loss_weights
-        self.runnings = runnings
         self.compute_nll_loss = rpo_alpha > 0
         self.compiled = compiled
         self.use_ref_model = use_ref_model
@@ -489,6 +489,7 @@ class LigerFusedLinearPackDPOLoss(torch.nn.Module):
             ref_bias=None,
             num_tokens=None,
             global_chosen_label_sum=None,
+            bco_pair_mean=None
     ):
         return LigerFusedLinearPackDPOFunction.apply(
             _input,
@@ -503,10 +504,10 @@ class LigerFusedLinearPackDPOLoss(torch.nn.Module):
             self.rpo_alpha,
             self.loss_types,
             self.loss_weights,
-            self.runnings,
             self.compute_nll_loss,
             self.compiled,
             self.use_ref_model,
             num_tokens,
-            global_chosen_label_sum
+            global_chosen_label_sum,
+            bco_pair_mean
         )
