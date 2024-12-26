@@ -32,6 +32,7 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
         ref_input=None,
         ref_weight=None,
         ref_bias=None,
+        global_chosen_label_sum=None,
         **loss_kwargs,
     ):
         """
@@ -90,6 +91,7 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
             alpha=alpha,
             beta=beta,
             compute_nll_loss=compute_nll_loss,
+            global_chosen_label_sum=global_chosen_label_sum,
             full_target=target,
             use_ref_model=use_ref_model,
             ref_weight=ref_weight,
@@ -255,7 +257,7 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
             grad_weight = grad_weight * grad_output[0][0]
             grad_bias = grad_bias * grad_output[0][0] if grad_bias is not None else None
 
-        return grad_input, grad_weight, None, grad_bias, None, None, None
+        return grad_input, grad_weight, None, grad_bias, None, None, None, None
 
     @staticmethod
     def chunk_forward(
@@ -318,6 +320,7 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
         ref_input_chunk=None,
         ref_weight=None,
         ref_bias=None,
+        global_chosen_label_sum=None,
         **loss_kwargs,
     ):
         """
@@ -352,8 +355,10 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
             ignore_index=ignore_index,
             compute_nll_loss=compute_nll_loss,
         )
-        # chosen_nll_loss = chosen_nll_loss / ((full_target.shape[0] // 2)*full_target[: full_target.shape[0] // 2] != ignore_index).sum()
-        chosen_nll_loss = chosen_nll_loss / ((1)*full_target[: full_target.shape[0] // 2] != ignore_index).sum()
+        if global_chosen_label_sum is not None:
+            chosen_nll_loss = chosen_nll_loss / global_chosen_label_sum
+        else:
+            chosen_nll_loss = chosen_nll_loss / (full_target[: full_target.shape[0] // 2] != ignore_index).sum()
         chosen_logits_mean = chosen_logits.sum() / (full_target.shape[0] // 2 * input_chunk.shape[1] * weight.shape[0])
         rejected_logits_mean = rejected_logits.sum() / (
             full_target.shape[0] // 2 * input_chunk.shape[1] * weight.shape[0]

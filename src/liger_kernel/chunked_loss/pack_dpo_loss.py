@@ -60,19 +60,22 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             ref_rejected_logps: Reference log probs of rejected tokens (batch_size,)
             beta: Weight for the direct preference loss
         """
-        chosen_logratios = chosen_logps - ref_chosen_logps
-        rejected_logratios = rejected_logps - ref_rejected_logps
-        chosen_rewards = beta * chosen_logratios
-        rejected_rewards = beta * rejected_logratios
-        if loss_type == 'sigmoid':
-            logits_diff = beta * (chosen_logratios - rejected_logratios)
+        pi_logratios = chosen_logps - rejected_logps
+        ref_logratios = ref_chosen_logps - ref_rejected_logps
+        logits = pi_logratios - ref_logratios
 
+        chosen_rewards = beta * (
+                chosen_logps - ref_chosen_logps)
+        rejected_rewards = beta * (
+                rejected_logps - ref_rejected_logps)
+
+        if loss_type == 'sigmoid':
+            logits_diff = beta * logits
             loss = -F.logsigmoid(logits_diff).sum() / chosen_bs
 
         elif loss_type == 'bco_pair':
-            # rewards = torch.cat((chosen_rewards, rejected_rewards), 0).mean().detach()
             delta = runnings.mean
-            loss = -F.logsigmoid((beta * chosen_logratios) - delta) - F.logsigmoid(-(beta * rejected_logratios - delta))
+            loss = -F.logsigmoid(chosen_rewards - delta) - F.logsigmoid(-(rejected_rewards - delta))
             loss = loss.sum() / chosen_bs
         else:
             raise ValueError(f"Unknown loss type: {loss_type}")
@@ -188,6 +191,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
                 ) = fused_fwd_bwd(input_chunk, target_chunk, ref_input_chunk, len_chosen_chunk)
 
             # Accumulate gradients
+            # print(chunk_grad_weight.dtype,'xxxx')
             grad_weight.add_(chunk_grad_weight)
             # TODO: 暂时只支持 chunk_size=1，否则这里是错误的
             grad_chosen_inputs.append(chunk_grad_input[:, :len_chosen_chunk])
@@ -201,7 +205,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             policy_rejected_logits_mean.append(chunk_rejected_logits_mean)
             policy_nll_loss.add_(chunk_nll_loss)
 
-            if bco_pair_rewards is not None:
+            if bco_pair_rewards.sum() != 0:
                 bco_pair_rewards_batch.append(bco_pair_rewards)
 
         if compiled:
@@ -255,8 +259,8 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             bco_pair_rewards_batch = torch.cat(bco_pair_rewards_batch).mean().detach()
             runnings.update(bco_pair_rewards_batch)
 
-        grad_inputs = [torch.cat([grad_chosen_inputs, grad_rejected_inputs], dim=1) for
-                       grad_chosen_inputs, grad_rejected_inputs in zip(grad_chosen_inputs, grad_rejected_inputs)]
+        grad_inputs = [torch.cat([grad_chosen_input, grad_rejected_input], dim=1) for
+                       grad_chosen_input, grad_rejected_input in zip(grad_chosen_inputs, grad_rejected_inputs)]
         grad_inputs = torch.cat(grad_inputs, dim=1)
 
         policy_chosen_logits_mean = torch.stack(policy_chosen_logits_mean, dim=0)
@@ -337,13 +341,8 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             len_chosen_chunk=len_chosen_chunk,
         )
         chosen_bs = len(num_tokens) // 2
+        # 是否要矫正，需要商榷,如果不全局矫正，则需要在外面把 all-reduce 关掉
         chosen_nll_loss = chosen_nll_loss / global_chosen_label_sum
-
-        # TODO 是否要除以分母？ 只是显示
-        # chosen_logits_mean = chosen_logits.sum() / (chosen_bs * chosen_logits.shape[1] * weight.shape[0])
-        # rejected_logits_mean = rejected_logits.sum() / (
-        #         chosen_bs * rejected_logits.shape[1] * weight.shape[0]
-        # )
 
         if use_ref_model:
             with torch.no_grad():
@@ -365,7 +364,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             loss_kwargs["ref_chosen_logps"] = ref_chosen_logps
             loss_kwargs["ref_rejected_logps"] = ref_rejected_logps
 
-        bco_pair_rewards = None
+        bco_pair_rewards = torch.tensor(0)
         dpo_losses, chosen_rewards, rejected_rewards = 0, 0, 0
         for curr_type, curr_weight in zip(loss_types, loss_weights):
             curr_losses, curr_chosen_rewards, curr_rejected_rewards = preference_loss_fn(
@@ -373,7 +372,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
                 loss_weight=curr_weight, runnings=runnings, **loss_kwargs
             )
             if curr_type == 'bco_pair':
-                # 必须要是 batch 级别更新，否则不准确，因此需要6特别处理
+                # 必须要是 batch 级别更新，否则不准确，因此需要特别处理
                 bco_pair_rewards = torch.cat((curr_chosen_rewards, curr_rejected_rewards), 0).detach()
 
             dpo_losses = dpo_losses + curr_losses * curr_weight
@@ -426,7 +425,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
             chosen_logps = sum_logps[:, :len_chosen_chunk].sum(-1) / loss_mask[:, :len_chosen_chunk].sum(-1)
             rejected_logps = sum_logps[:, len_chosen_chunk:].sum(-1) / loss_mask[:, len_chosen_chunk:].sum(-1)
         else:
-            sum_logps = per_token_logps
+            sum_logps = per_token_logps * loss_mask
             chosen_logps = sum_logps[:, :len_chosen_chunk].sum(-1)
             rejected_logps = sum_logps[:, len_chosen_chunk:].sum(-1)
 
@@ -441,6 +440,7 @@ class LigerFusedLinearPackDPOFunction(LigerFusedLinearPreferenceBase):
     @staticmethod
     def backward(ctx, *grad_output):
         grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
+        # print(grads[1].dtype,'xyyyyyyyxx')
         return *grads, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 

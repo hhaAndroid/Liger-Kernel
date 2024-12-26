@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 set_random_seed(42)
 
+
 def unpack_sequence(packed: torch.Tensor,
                     num_tokens,
                     dim=1):
@@ -36,9 +37,9 @@ class LigerLMHeadDPO(torch.nn.Module):
         self.dpo_loss_pack = LigerFusedLinearPackDPOLoss(
             ignore_index=ignore_index,
             beta=beta,
-            loss_types=('sigmoid', 'bco_pair'),
+            loss_types=('sigmoid', ),
             runnings=self.running,
-            loss_weights=(0.8, 0.2,),
+            loss_weights=(1.0, ),
             use_ref_model=True
         )
         self.dpo_loss = LigerFusedLinearDPOLoss(
@@ -139,53 +140,53 @@ batch_input_ids = batch_input_ids[torch.tensor([0, 1, 4, 5])]
 ref_batch_input_ids = ref_batch_input_ids[torch.tensor([0, 1, 4, 5])]
 batch_labels = batch_labels[torch.tensor([0, 1, 4, 5])]
 
-input1 = batch_input_ids.detach().clone().requires_grad_(True)
-# 要求输入的所有 chosen bs 都在前面，否则结果不对
-loss1, aggregated_aux_outputs1 = liger_lm_head_dpo(input1, ref_batch_input_ids, batch_labels)
-# print(loss1)
-# print(aggregated_aux_outputs1)
-loss_dict = {
-    'dpo_losses': loss1,
-    'chosen_rewards': aggregated_aux_outputs1[0].mean(),
-    'rejected_rewards': aggregated_aux_outputs1[1].mean(),
-    'reward_margin': (aggregated_aux_outputs1[0].mean() - aggregated_aux_outputs1[1].mean()),
-}
-print(loss_dict)
+# input1 = batch_input_ids.detach().clone().requires_grad_(True)
+# # 要求输入的所有 chosen bs 都在前面，否则结果不对
+# loss1, aggregated_aux_outputs1 = liger_lm_head_dpo(input1, ref_batch_input_ids, batch_labels)
+# # print(loss1)
+# # print(aggregated_aux_outputs1)
+# loss_dict = {
+#     'dpo_losses': loss1,
+#     'chosen_rewards': aggregated_aux_outputs1[0].mean(),
+#     'rejected_rewards': aggregated_aux_outputs1[1].mean(),
+#     'reward_margin': (aggregated_aux_outputs1[0].mean() - aggregated_aux_outputs1[1].mean()),
+# }
+# print(loss_dict)
 # loss1.backward()
 # print(liger_lm_head_dpo.lin.weight.grad, liger_lm_head_dpo.lin.bias.grad)
 # print(input1.grad)
 # liger_lm_head_dpo.lin.weight.grad = None
 # liger_lm_head_dpo.lin.bias.grad = None
 
-pack_input_ids = pack_input_ids.detach().clone().requires_grad_(True)
-print('========================')
+pack_input_ids1 = pack_input_ids.detach().clone().requires_grad_(True)
+# print('========================')
 target_ = unpack_sequence(pack_labels, num_tokens)
 global_chosen_label_sum = sum([(t != -100).sum() for t in target_[0::2]])
 loss1, policy_chosen_logits_mean, policy_rejected_logits_mean, reward_margin, reward_acc, policy_nll_loss = liger_lm_head_dpo(
-    pack_input_ids,
+    pack_input_ids1,
     ref_pack_input_ids,
     pack_labels,
     num_tokens=num_tokens,
     pack=True,
     global_chosen_label_sum=global_chosen_label_sum)
-# print(loss1)
-# print(aggregated_aux_outputs1)
+
 
 loss_dict = {
-    'dpo_losses': loss1,
+    'total_losses': loss1,
+    'dpo_loss': loss1 - policy_nll_loss,
+    'policy_nll_loss': policy_nll_loss,
     'chosen_rewards': policy_chosen_logits_mean,
     'rejected_rewards': policy_rejected_logits_mean,
     'reward_margin': reward_margin,
     'reward_acc': reward_acc,
-    'policy_nll_loss': policy_nll_loss,
 }
 print(loss_dict)
 
 loss1.backward()
-# print(liger_lm_head_dpo.lin.weight.grad, liger_lm_head_dpo.lin.bias.grad)
-# print(pack_input_ids.grad)
-# liger_lm_head_dpo.lin.weight.grad = None
-# liger_lm_head_dpo.lin.bias.grad = None
+print(liger_lm_head_dpo.lin.weight.grad.sum(), liger_lm_head_dpo.lin.bias.grad.sum())
+print(pack_input_ids1.grad.sum())
+liger_lm_head_dpo.lin.weight.grad = None
+liger_lm_head_dpo.lin.bias.grad = None
 
 import torch.nn as nn
 
@@ -196,12 +197,6 @@ def cross_entropy_loss(logits, labels):
     labels = labels.view(-1)
     labels = labels.to(logits.device)
     loss = loss_fct(logits, labels).sum()
-    # loss = F.nll_loss(
-    #     logits.view(-1, logits.shape[-1]),
-    #     labels.view(-1),
-    #     reduction="sum",
-    #     ignore_index=-100,
-    # )
     return loss
 
 
@@ -212,7 +207,6 @@ def get_pack_logps(
 ):
     def compute_logps(_logps, _mask):
         _logps = _logps.sum(-1)
-        # _logps = (_logps * _mask).sum(-1) / _mask.sum(-1)
         return _logps
 
     (policy_chosen_logps, policy_rejected_logps, reference_chosen_logps,
@@ -247,12 +241,22 @@ _labels[_labels == -100] = 0
 loss_mask = _labels != 0
 global_loss_mask = loss_mask
 
-all_logits = liger_lm_head_dpo.lin(pack_input_ids).float()
+logits_chunk = pack_input_ids @ liger_lm_head_dpo.lin.weight.t()
+if liger_lm_head_dpo.lin.bias is not None:
+    logits_chunk = logits_chunk + liger_lm_head_dpo.lin.bias
+all_logits = logits_chunk.float()
 with torch.no_grad():
-    all_logits_ref = liger_lm_head_dpo.ref_lin(ref_pack_input_ids).float()
+    ref_logits_chunk = ref_pack_input_ids @ liger_lm_head_dpo.ref_lin.weight.t()
+    if liger_lm_head_dpo.ref_lin.bias is not None:
+        ref_logits_chunk = ref_logits_chunk + liger_lm_head_dpo.ref_lin.bias
+    all_logits_ref = ref_logits_chunk.float()
 
-policy_logps = torch.gather(all_logits.log_softmax(-1), dim=2, index=_labels.unsqueeze(2)).squeeze(2)
-ref_logps = torch.gather(all_logits_ref.log_softmax(-1), dim=2, index=_labels.unsqueeze(2)).squeeze(2)
+# all_logits = liger_lm_head_dpo.lin(pack_input_ids).float()
+# with torch.no_grad():
+#     all_logits_ref = liger_lm_head_dpo.ref_lin(ref_pack_input_ids).float()
+
+policy_logps = torch.gather(all_logits.log_softmax(-1), dim=2, index=_labels.unsqueeze(2)).squeeze(2) * loss_mask
+ref_logps = torch.gather(all_logits_ref.log_softmax(-1), dim=2, index=_labels.unsqueeze(2)).squeeze(2) * loss_mask
 
 policy_logps_list = unpack_sequence(policy_logps, num_tokens)
 all_ref_logits_list = unpack_sequence(ref_logps, num_tokens)
@@ -287,6 +291,8 @@ loss_dict = {
     'reward_margin': (chosen_rewards - rejected_rewards).mean(),
 }
 print(loss_dict)
-# total_loss.backward()
-# print(liger_lm_head_dpo.lin.weight.grad, liger_lm_head_dpo.lin.bias.grad)
-# print(pack_input_ids.grad)
+total_loss.backward()
+print(liger_lm_head_dpo.lin.weight.grad.sum(), liger_lm_head_dpo.lin.bias.grad.sum())
+print(pack_input_ids.grad.sum())
+liger_lm_head_dpo.lin.weight.grad = None
+liger_lm_head_dpo.lin.bias.grad = None

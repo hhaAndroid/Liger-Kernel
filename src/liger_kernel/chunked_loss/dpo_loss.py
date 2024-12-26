@@ -64,6 +64,7 @@ class LigerFusedLinearDPOFunction(LigerFusedLinearPreferenceBase):
         compute_nll_loss=False,
         compiled=True,
         use_ref_model=True,
+        global_chosen_label_sum=None
     ):
         return LigerFusedLinearPreferenceBase.forward(
             ctx=ctx,
@@ -80,12 +81,13 @@ class LigerFusedLinearDPOFunction(LigerFusedLinearPreferenceBase):
             ref_input=ref_input,
             ref_weight=ref_weight,
             ref_bias=ref_bias,
+            global_chosen_label_sum=global_chosen_label_sum
         )
 
     @staticmethod
     def backward(ctx, *grad_output):
         grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
-        return *grads, None, None, None, None, None, None, None, None
+        return *grads, None, None, None, None, None, None, None, None, None
 
 
 class LigerFusedLinearDPOLoss(torch.nn.Module):
@@ -125,6 +127,7 @@ class LigerFusedLinearDPOLoss(torch.nn.Module):
         ref_input=None,
         ref_weight=None,
         ref_bias=None,
+        global_chosen_label_sum=None
     ):
         return LigerFusedLinearDPOFunction.apply(
             _input,
@@ -139,4 +142,5 @@ class LigerFusedLinearDPOLoss(torch.nn.Module):
             self.compute_nll_loss,
             self.compiled,
             self.use_ref_model,
+            global_chosen_label_sum
         )
